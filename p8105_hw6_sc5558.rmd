@@ -8,23 +8,174 @@ output: github_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+Import Necessary Libraries
+```{r}
+library(tidyverse)
+library(broom)
+library(p8105.datasets)
+```
 
 ## Problem 1
+```{r}
+#Load and Clean Data
+homicides = read_csv("homicide-data.csv") |>
+  mutate(
+    city_state = str_c(city, ", ", state),
+    solved = case_when(
+      disposition == "Closed by arrest" ~ 1,
+      TRUE ~ 0
+    ),
+    victim_age = as.numeric(victim_age)
+  ) |>
+  filter(
+    !(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO")),
+    city_state != "Tulsa, AL",
+    victim_race %in% c("White", "Black")
+  )
+```
+Logistic Regression - Baltimore, MD
+```{r}
+baltimore_df = homicides |> filter(city_state == "Baltimore, MD")
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+baltimore_fit = glm(
+  solved ~ victim_age + victim_sex + victim_race,
+  family = binomial,
+  data = baltimore_df
+)
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+baltimore_results =
+  tidy(baltimore_fit, conf.int = TRUE, exponentiate = TRUE)
 
-```{r cars}
-summary(cars)
+baltimore_results
+```
+Extract adjusted OR
+```{r}
+baltimore_or =
+  baltimore_results |> 
+  filter(term == "victim_sexMale") |> 
+  select(estimate, conf.low, conf.high)
 ```
 
-## Including Plots
+Fit Models for ALL Cities
+```{r}
+city_results = 
+  homicides |>
+  group_by(city_state) |>
+  nest() |>
+  mutate(
+    model = map(data, ~ glm(
+      solved ~ victim_age + victim_sex + victim_race,
+      family = binomial,
+      data = .x
+    )),
+    tidy_model = map(model, ~ tidy(.x, conf.int = TRUE, exponentiate = TRUE))
+  ) |>
+  unnest(tidy_model) |>
+  filter(term == "victim_sexMale")
+```
+Plot Adjusted ORs by City 
+```{r}
+city_results |>
+  mutate(city_state = fct_reorder(city_state, estimate)) |>
+  ggplot(aes(x = estimate, y = city_state)) +
+  geom_point() +
+  geom_errorbar(aes(xmin = conf.low, xmax = conf.high), width = 0.2) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  labs(
+    x = "Adjusted Odds Ratio (male vs female)",
+    y = "City",
+    title = "Adjusted OR for Male vs Female Victims — Homicide Solved Probability"
+  )
+```
+Text Comment: 
+Cities vary widely in the adjusted odds of a homicide being solved for male versus female victims. Several cities have OR estimates above 1, indicating that homicides of male victims are more likely to be solved relative to female victims, while others have ORs below 1, showing the opposite pattern. Confidence intervals are often wide, reflecting small sample sizes. Cities with narrower CIs tend to have larger homicide counts and more stable estimates.
+## Problem 2
 
-You can also embed plots, for example:
+Load Data
+```{r}
+data("weather_df")
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+weather_df = 
+  weather_df |>
+  drop_na(tmax, tmin, prcp)
+```
+Fit the regression we're boostrapping around: 
+```{r}
+orig_fit = lm(tmax ~ tmin + prcp, data = weather_df)
+
+glance(orig_fit)    # contains r.squared
+tidy(orig_fit)      # contains coefficients, including beta1 / beta2
+```
+Define a function to do one bootstrap replicate
+```{r}
+boot_once = function(df) {
+  
+  boot_sample = df |> 
+    slice_sample(prop = 1, replace = TRUE)
+  
+  fit = lm(tmax ~ tmin + prcp, data = boot_sample)
+  
+  g = glance(fit)
+  t = tidy(fit)
+  
+  r2 = g$r.squared
+  
+  beta1 = t$estimate[t$term == "tmin"]
+  beta2 = t$estimate[t$term == "prcp"]
+  
+  tibble(
+    r2 = r2,
+    beta_ratio = beta1 / beta2
+  )
+}
+```
+Run 5000 bootstrap samples
+```{r}
+set.seed(8105)
+
+boot_results = 
+  tibble(rep = 1:5000) |>
+  mutate(
+    estimates = map(rep, ~ boot_once(weather_df))
+  ) |>
+  unnest(estimates)
+```
+Distribution of r^2
+```{r}
+boot_results |>
+  ggplot(aes(x = r2)) +
+  geom_histogram(bins = 30) +
+  labs(
+    x = expression(r^2),
+    y = "Count",
+    title = expression("Bootstrap distribution of " * r^2)
+  )
+```
+Distribution of beta 1 hat/beta 2 hat
+```{r}
+boot_results |>
+  ggplot(aes(x = beta_ratio)) +
+  geom_histogram(bins = 30) +
+  labs(
+    x = expression(hat(beta)[1] / hat(beta)[2]),
+    y = "Count",
+    title = expression("Bootstrap distribution of " * hat(beta)[1] / hat(beta)[2])
+  )
+```
+Comment: 
+The bootstrap distribution of r^2 is fairly concentrated, suggesting that model fit is reasonable stable across resamples. 
+95% bootstrap Cls using quantiles 
+```{r}
+ci_summary = 
+  boot_results |>
+  summarize(
+    r2_lo = quantile(r2, 0.025),
+    r2_hi = quantile(r2, 0.975),
+    ratio_lo = quantile(beta_ratio, 0.025),
+    ratio_hi = quantile(beta_ratio, 0.975)
+  )
+
+ci_summary
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
