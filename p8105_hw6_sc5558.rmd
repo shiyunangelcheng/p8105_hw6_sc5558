@@ -13,12 +13,14 @@ Import Necessary Libraries
 library(tidyverse)
 library(broom)
 library(p8105.datasets)
+library(modelr)
+library(purrr)
 ```
 
 ## Problem 1
 ```{r}
 #Load and Clean Data
-homicides = read_csv("homicide-data.csv") |>
+homicides = read_csv("data/homicide-data.csv") |>
   mutate(
     city_state = str_c(city, ", ", state),
     solved = case_when(
@@ -94,7 +96,6 @@ Cities vary widely in the adjusted odds of a homicide being solved for male vers
 Load Data
 ```{r}
 data("weather_df")
-
 weather_df = 
   weather_df |>
   drop_na(tmax, tmin, prcp)
@@ -177,5 +178,84 @@ ci_summary =
 
 ci_summary
 ```
+## Problem 3 
+```{r}
+#load and clean data 
+birthweight =
+  read_csv("data/birthweight.csv") |>
+  janitor::clean_names() |>
+  mutate(
+    babysex = factor(babysex, labels = c("male", "female")),
+    frace = factor(frace),
+    mrace = factor(mrace),
+    malform = factor(malform, labels = c("absent", "present")),
+    # mother's smoking could be numeric; leave as numeric since it's continuous
+  ) |>
+  drop_na()
+```
+```{r}
+# propose a regression model fro birthweight
+mod_main =
+  lm(bwt ~ babysex + blength + gaweeks + momage +
+        mheight + ppbmi + smoken,
+     data = birthweight)
+```
+Residual plot using add_predictions and add_residuals
+```{r}
+birthweight_with_preds =
+  birthweight |>
+  add_predictions(mod_main) |>
+  add_residuals(mod_main)
 
+birthweight_with_preds |>
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs Fitted Values"
+  )
+```
+The residuals show no strong nonlinear pattern, though variance increases slightly at higher fitted birthweights. Overall, the model appears reasonably well-behaved with no severe violations.
+
+Comparison Model 1: Length + gestational age (main effects only) 
+```{r}
+mod_len_ga =
+  lm(bwt ~ blength + gaweeks, data = birthweight)
+```
+Comparison Model 2: Head circumference, length, sex, and all interactions (including 3-way) 
+```{r}
+mod_big =
+  lm(bwt ~ (bhead + blength + babysex)^3, data = birthweight)
+```
+Cross-validated prediction error using cross_mc
+```{r}
+cv_df =
+  crossv_mc(birthweight, 100) |>
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble),
+    mod_main = map(train, ~ lm(bwt ~ babysex + blength + gaweeks +
+                                      momage + mheight + ppbmi + smoken, data = .x)),
+    mod_len_ga = map(train, ~ lm(bwt ~ blength + gaweeks, data = .x)),
+    mod_big = map(train, ~ lm(bwt ~ (bhead + blength + babysex)^3, data = .x)),
+    rmse_main = map2_dbl(mod_main, test, ~ rmse(.x, .y)),
+    rmse_len_ga = map2_dbl(mod_len_ga, test, ~ rmse(.x, .y)),
+    rmse_big = map2_dbl(mod_big, test, ~ rmse(.x, .y))
+  )
+```
+Summarize RMSE for each model 
+```{r}
+cv_df |>
+  select(starts_with("rmse")) |>
+  pivot_longer(everything(), names_to = "model", values_to = "rmse") |>
+  ggplot(aes(x = model, y = rmse)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15, fill = "white") +
+  labs(title = "Cross-validated RMSE for three birthweight models",
+       x = "Model",
+       y = "RMSE")
+```
+Interpretation: 
 
